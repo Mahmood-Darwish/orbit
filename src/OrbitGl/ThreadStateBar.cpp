@@ -71,11 +71,7 @@ Color ApplyLighting(const Color& color, float lighting_coff) {
   };
 }
 
-static Color GetThreadStateColor(ThreadStateSlice::ThreadState state, bool is_selected) {
-  float lighting_coff = 1;
-  if (is_selected) {
-    lighting_coff = 1.5;
-  }
+static Color GetThreadStateColor(ThreadStateSlice::ThreadState state) {
   Color kGreen500{76, 175, 80, 255};
   Color kBlue500{33, 150, 243, 255};
   Color kGray600{117, 117, 117, 255};
@@ -87,25 +83,25 @@ static Color GetThreadStateColor(ThreadStateSlice::ThreadState state, bool is_se
 
   switch (state) {
     case ThreadStateSlice::kRunning:
-      return ApplyLighting(kGreen500, lighting_coff);
+      return kGreen500;
     case ThreadStateSlice::kRunnable:
-      return ApplyLighting(kBlue500, lighting_coff);
+      return kBlue500;
     case ThreadStateSlice::kInterruptibleSleep:
-      return ApplyLighting(kGray600, lighting_coff);
+      return kGray600;
     case ThreadStateSlice::kUninterruptibleSleep:
-      return ApplyLighting(kOrange500, lighting_coff);
+      return kOrange500;
     case ThreadStateSlice::kStopped:
-      return ApplyLighting(kRed500, lighting_coff);
+      return kRed500;
     case ThreadStateSlice::kTraced:
-      return ApplyLighting(kPurple500, lighting_coff);
+      return kPurple500;
     case ThreadStateSlice::kDead:
       [[fallthrough]];
     case ThreadStateSlice::kZombie:
-      return ApplyLighting(kBlack, lighting_coff);
+      return kBlack;
     case ThreadStateSlice::kParked:
       [[fallthrough]];
     case ThreadStateSlice::kIdle:
-      return ApplyLighting(kBrown500, lighting_coff);
+      return kBrown500;
     default:
       ORBIT_UNREACHABLE();
   }
@@ -250,12 +246,11 @@ void ThreadStateBar::DoUpdatePrimitives(PrimitiveAssembler& primitive_assembler,
         const Vec2 pos{x0, GetPos()[1]};
         const Vec2 size{width, GetHeight()};
 
-        bool is_this_slice_selected = false;
+        Color color = GetThreadStateColor(slice.thread_state());
         if (slice == app_->selected_thread_state_slice()) {
-          is_this_slice_selected = true;
+          float lighting_coff = 1.5f;
+          color = ApplyLighting(color, lighting_coff);
         }
-
-        const Color color = GetThreadStateColor(slice.thread_state(), is_this_slice_selected);
 
         auto user_data = std::make_unique<PickingUserData>(nullptr, [&](PickingId id) {
           return GetThreadStateSliceTooltip(primitive_assembler, id);
