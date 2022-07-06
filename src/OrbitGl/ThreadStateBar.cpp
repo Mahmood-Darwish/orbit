@@ -62,37 +62,50 @@ void ThreadStateBar::DoDraw(PrimitiveAssembler& primitive_assembler, TextRendere
   primitive_assembler.AddBox(box, thread_state_bar_z, kTransparent, shared_from_this());
 }
 
-static Color GetThreadStateColor(ThreadStateSlice::ThreadState state) {
-  static const Color kGreen500{76, 175, 80, 255};
-  static const Color kBlue500{33, 150, 243, 255};
-  static const Color kGray600{117, 117, 117, 255};
-  static const Color kOrange500{255, 152, 0, 255};
-  static const Color kRed500{244, 67, 54, 255};
-  static const Color kPurple500{156, 39, 176, 255};
-  static const Color kBlack{0, 0, 0, 255};
-  static const Color kBrown500{121, 85, 72, 255};
+Color ApplyLighting(const Color& color, float lighting_coff) {
+  return Color{
+      static_cast<unsigned char>(std::min(255, static_cast<int>(color[0] * lighting_coff))),
+      static_cast<unsigned char>(std::min(255, static_cast<int>(color[1] * lighting_coff))),
+      static_cast<unsigned char>(std::min(255, static_cast<int>(color[2] * lighting_coff))),
+      255,
+  };
+}
+
+static Color GetThreadStateColor(ThreadStateSlice::ThreadState state, bool is_selected) {
+  float lighting_coff = 1;
+  if (is_selected) {
+    lighting_coff = 1.5;
+  }
+  Color kGreen500{76, 175, 80, 255};
+  Color kBlue500{33, 150, 243, 255};
+  Color kGray600{117, 117, 117, 255};
+  Color kOrange500{255, 152, 0, 255};
+  Color kRed500{244, 67, 54, 255};
+  Color kPurple500{156, 39, 176, 255};
+  Color kBlack{0, 0, 0, 255};
+  Color kBrown500{121, 85, 72, 255};
 
   switch (state) {
     case ThreadStateSlice::kRunning:
-      return kGreen500;
+      return ApplyLighting(kGreen500, lighting_coff);
     case ThreadStateSlice::kRunnable:
-      return kBlue500;
+      return ApplyLighting(kBlue500, lighting_coff);
     case ThreadStateSlice::kInterruptibleSleep:
-      return kGray600;
+      return ApplyLighting(kGray600, lighting_coff);
     case ThreadStateSlice::kUninterruptibleSleep:
-      return kOrange500;
+      return ApplyLighting(kOrange500, lighting_coff);
     case ThreadStateSlice::kStopped:
-      return kRed500;
+      return ApplyLighting(kRed500, lighting_coff);
     case ThreadStateSlice::kTraced:
-      return kPurple500;
+      return ApplyLighting(kPurple500, lighting_coff);
     case ThreadStateSlice::kDead:
       [[fallthrough]];
     case ThreadStateSlice::kZombie:
-      return kBlack;
+      return ApplyLighting(kBlack, lighting_coff);
     case ThreadStateSlice::kParked:
       [[fallthrough]];
     case ThreadStateSlice::kIdle:
-      return kBrown500;
+      return ApplyLighting(kBrown500, lighting_coff);
     default:
       ORBIT_UNREACHABLE();
   }
@@ -237,7 +250,12 @@ void ThreadStateBar::DoUpdatePrimitives(PrimitiveAssembler& primitive_assembler,
         const Vec2 pos{x0, GetPos()[1]};
         const Vec2 size{width, GetHeight()};
 
-        const Color color = GetThreadStateColor(slice.thread_state());
+        bool is_this_slice_selected = false;
+        if (slice == app_->selected_thread_state_slice()) {
+          is_this_slice_selected = true;
+        }
+
+        const Color color = GetThreadStateColor(slice.thread_state(), is_this_slice_selected);
 
         auto user_data = std::make_unique<PickingUserData>(nullptr, [&](PickingId id) {
           return GetThreadStateSliceTooltip(primitive_assembler, id);
