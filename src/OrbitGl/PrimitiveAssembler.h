@@ -114,7 +114,10 @@ class PrimitiveAssembler {
   //
   // x is starting_pos
   void AddVerticalArrow(Vec2 starting_pos, Vec2 arrow_body_size, Vec2 arrow_head_size, float z,
-                        const Color& color, ArrowDirection arrow_direction);
+                        const Color& arrow_color, ArrowDirection arrow_direction);
+  void AddVerticalArrowWithOutline(Vec2 starting_pos, Vec2 arrow_body_size, Vec2 arrow_head_size,
+                                   float z, const Color& arrow_color,
+                                   ArrowDirection arrow_direction, const Color& outline_color);
 
   void StartNewFrame();
 

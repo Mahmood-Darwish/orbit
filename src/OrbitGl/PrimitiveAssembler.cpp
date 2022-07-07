@@ -246,7 +246,7 @@ void PrimitiveAssembler::AddCircle(const Vec2& position, float radius, float z,
 }
 
 void PrimitiveAssembler::AddVerticalArrow(Vec2 starting_pos, Vec2 arrow_body_size,
-                                          Vec2 arrow_head_size, float z, const Color& color,
+                                          Vec2 arrow_head_size, float z, const Color& arrow_color,
                                           ArrowDirection arrow_direction) {
   float body_head_meeting_y =
       starting_pos[1] +
@@ -262,7 +262,7 @@ void PrimitiveAssembler::AddVerticalArrow(Vec2 starting_pos, Vec2 arrow_body_siz
       Vec2(starting_pos[0] - head_half_width, body_head_meeting_y),
       Vec2(starting_pos[0] + head_half_width, body_head_meeting_y),
   };
-  AddTriangle(arrow_head, z, color);
+  AddTriangle(arrow_head, z, arrow_color);
 
   float arrow_body_min_y = std::min(starting_pos[1], body_head_meeting_y);
   float arrow_body_max_y = std::max(starting_pos[1], body_head_meeting_y);
@@ -275,7 +275,27 @@ void PrimitiveAssembler::AddVerticalArrow(Vec2 starting_pos, Vec2 arrow_body_siz
       Vec2(starting_pos[0] + body_half_width, arrow_body_max_y),
   };
   Quad arrow_body(box_vertices);
-  AddBox(arrow_body, z, color);
+  AddBox(arrow_body, z, arrow_color);
+}
+
+void PrimitiveAssembler::AddVerticalArrowWithOutline(Vec2 starting_pos, Vec2 arrow_body_size,
+                                                     Vec2 arrow_head_size, float z,
+                                                     const Color& arrow_color,
+                                                     ArrowDirection arrow_direction,
+                                                     const Color& outline_color) {
+  const float outline_size = 2;
+  const float total_length = arrow_head_size[1] + arrow_body_size[1];
+  if (total_length == 0.0f) {
+    return;
+  }
+  const float new_starting_y =
+      (arrow_direction == ArrowDirection::kUp ? -outline_size : outline_size) + starting_pos[1];
+  const Vec2 new_starting_pos{starting_pos[0], new_starting_y + 2};
+  AddVerticalArrow(starting_pos, arrow_body_size, arrow_head_size, z, outline_color,
+                   arrow_direction);
+  AddVerticalArrow(new_starting_pos, arrow_body_size - Vec2{outline_size, outline_size},
+                   arrow_head_size - (Vec2{outline_size * 2, outline_size * 2}), z + 0.01,
+                   arrow_color, arrow_direction);
 }
 
 void PrimitiveAssembler::AddQuadBorder(const Quad& quad, float z, const Color& color,
