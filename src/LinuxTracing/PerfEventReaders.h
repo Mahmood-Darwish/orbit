@@ -43,6 +43,20 @@ StackSamplePerfEvent ConsumeStackSamplePerfEvent(PerfEventRingBuffer* ring_buffe
 CallchainSamplePerfEvent ConsumeCallchainSamplePerfEvent(PerfEventRingBuffer* ring_buffer,
                                                          const perf_event_header& header);
 
+CallchainSchedWakeupPerfEvent ConsumeCallchainSchedWakeupPerfEvent(PerfEventRingBuffer* ring_buffer,
+                                                                   const perf_event_header& header);
+
+CallchainSchedSwitchPerfEvent ConsumeCallchainSchedSwitchPerfEvent(PerfEventRingBuffer* ring_buffer,
+                                                                   const perf_event_header& header);
+
+StackSchedSwitchPerfEvent ConsumeStackSchedSwitchPerfEvent(PerfEventRingBuffer* ring_buffer,
+                                                           const perf_event_header& header,
+                                                           bool just_get_tracepoint);
+
+StackSchedWakeupPerfEvent ConsumeStackSchedWakeupPerfEvent(PerfEventRingBuffer* ring_buffer,
+                                                           const perf_event_header& header,
+                                                           bool just_get_tracepoint);
+
 GenericTracepointPerfEvent ConsumeGenericTracepointPerfEvent(PerfEventRingBuffer* ring_buffer,
                                                              const perf_event_header& header);
 

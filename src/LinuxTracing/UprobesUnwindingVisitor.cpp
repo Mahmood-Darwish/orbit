@@ -25,6 +25,8 @@
 #include "ModuleUtils/ReadLinuxModules.h"
 #include "OrbitBase/Logging.h"
 #include "OrbitBase/Result.h"
+#include "TracerImpl.h"
+#include "unwindstack/Error.h"
 
 namespace orbit_linux_tracing {
 
@@ -208,6 +210,7 @@ UprobesUnwindingVisitor::ComputeCallstackTypeFromStackSample(
     if (unwind_error_counter_ != nullptr) {
       ++(*unwind_error_counter_);
     }
+    // ORBIT_LOG("%s", unwindstack::GetErrorCodeString(libunwindstack_result.error_code()));
     return Callstack::kDwarfUnwindingError;
   }
 
@@ -235,7 +238,7 @@ void UprobesUnwindingVisitor::Visit(uint64_t event_timestamp,
   }
 
   LibunwindstackResult libunwindstack_result = unwinder_->Unwind(
-      event_data.pid, current_maps_->Get(), event_data.GetRegisters(), stack_slices);
+      event_data.pid, current_maps_->Get(), event_data.GetRegisters(), stack_slices, true, 30);
 
   if (libunwindstack_result.frames().empty()) {
     // Even with unwinding errors this is not expected because we should at least get the program
@@ -390,6 +393,99 @@ void UprobesUnwindingVisitor::Visit(uint64_t event_timestamp,
 
   ORBIT_CHECK(!callstack->pcs().empty());
   listener_->OnCallstackSample(std::move(sample));
+}
+
+void UprobesUnwindingVisitor::Visit(uint64_t event_timestamp,
+                                    const CallchainSchedWakeupPerfEventData& event_data) {
+  ORBIT_CHECK(listener_ != nullptr);
+
+  if (event_data.GetCallchainSize() <= 1) {
+    ORBIT_ERROR("Callchain has only %lu frames", event_data.GetCallchainSize());
+    return;
+  }
+  if (event_data.regs->abi == 0u) {
+    return;
+  }
+
+  CallchainSamplePerfEventData new_event;
+  new_event.tid = event_data.was_unblocked_by_tid;
+  new_event.pid = event_data.was_unblocked_by_pid;
+  new_event.ips = std::move(event_data.ips);
+  new_event.regs = std::move(event_data.regs);
+  new_event.ips_size = event_data.ips_size;
+  new_event.data = std::move(event_data.data);
+
+  Visit(event_timestamp, new_event);
+}
+
+void UprobesUnwindingVisitor::Visit(uint64_t event_timestamp,
+                                    const CallchainSchedSwitchPerfEventData& event_data) {
+  ORBIT_CHECK(listener_ != nullptr);
+
+  if (event_data.GetCallchainSize() <= 1) {
+    ORBIT_ERROR("Callchain has only %lu frames", event_data.GetCallchainSize());
+    return;
+  }
+  if (event_data.regs->abi == 0u) {
+    return;
+  }
+
+  CallchainSamplePerfEventData new_event;
+  new_event.tid = event_data.prev_tid;
+  new_event.pid = event_data.prev_pid_or_minus_one;
+  new_event.ips = std::move(event_data.ips);
+  new_event.regs = std::move(event_data.regs);
+  new_event.ips_size = event_data.ips_size;
+  new_event.data = std::move(event_data.data);
+
+  Visit(event_timestamp, new_event);
+}
+
+void UprobesUnwindingVisitor::Visit(uint64_t event_timestamp,
+                                    const StackSchedSwitchPerfEventData& event_data) {
+  ORBIT_CHECK(listener_ != nullptr);
+
+  if (event_data.regs->abi == 0u) {
+    return;
+  }
+  if (event_data.just_tracepoint) {
+    return;
+  }
+
+  StackSamplePerfEventData new_event;
+  new_event.tid = event_data.prev_tid;
+  new_event.pid = event_data.prev_pid_or_minus_one;
+  new_event.regs = std::move(event_data.regs);
+  new_event.data = std::move(event_data.data);
+  new_event.dyn_size = event_data.dyn_size;
+
+  // ORBIT_LOG("%llu", new_event.GetStackSize());
+  // ORBIT_LOG("%llx %llx", new_event.regs->abi, new_event.regs->ax);
+
+  Visit(event_timestamp, new_event);
+}
+
+void UprobesUnwindingVisitor::Visit(uint64_t event_timestamp,
+                                    const StackSchedWakeupPerfEventData& event_data) {
+  ORBIT_CHECK(listener_ != nullptr);
+  if (event_data.regs->abi == 0u) {
+    return;
+  }
+  if (event_data.just_tracepoint) {
+    return;
+  }
+
+  StackSamplePerfEventData new_event;
+  new_event.tid = event_data.woken_tid;
+  new_event.pid = event_data.was_unblocked_by_pid;
+  new_event.regs = std::move(event_data.regs);
+  new_event.data = std::move(event_data.data);
+  new_event.dyn_size = event_data.dyn_size;
+
+  // ORBIT_LOG("%llx", new_event.GetStackSize());
+  // ORBIT_LOG("%llx %llx", new_event.regs->abi, new_event.regs->ax);
+
+  Visit(event_timestamp, new_event);
 }
 
 void UprobesUnwindingVisitor::OnUprobes(

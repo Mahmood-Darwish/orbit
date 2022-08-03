@@ -14,6 +14,8 @@
 #include "OrbitBase/Logging.h"
 #include "OrbitBase/ThreadConstants.h"
 #include "OrbitBase/ThreadUtils.h"
+#include "PerfEvent.h"
+#include "PerfEventVisitor.h"
 
 namespace orbit_linux_tracing {
 
@@ -187,6 +189,50 @@ void SwitchesStatesNamesVisitor::Visit(uint64_t event_timestamp,
       ++(*thread_state_counter_);
     }
   }
+}
+
+void SwitchesStatesNamesVisitor::Visit(uint64_t event_timestamp,
+                                       const StackSchedSwitchPerfEventData& event_data) {
+  SchedSwitchPerfEventData new_event;
+  new_event.cpu = event_data.cpu;
+  new_event.next_tid = event_data.next_tid;
+  new_event.prev_pid_or_minus_one = event_data.prev_pid_or_minus_one;
+  new_event.prev_state = event_data.prev_state;
+  new_event.prev_tid = event_data.prev_tid;
+
+  Visit(event_timestamp, new_event);
+}
+
+void SwitchesStatesNamesVisitor::Visit(uint64_t event_timestamp,
+                                       const StackSchedWakeupPerfEventData& event_data) {
+  SchedWakeupPerfEventData new_event;
+  new_event.was_unblocked_by_pid = event_data.was_unblocked_by_pid;
+  new_event.was_unblocked_by_tid = event_data.was_unblocked_by_tid;
+  new_event.woken_tid = event_data.woken_tid;
+
+  Visit(event_timestamp, new_event);
+}
+
+void SwitchesStatesNamesVisitor::Visit(uint64_t event_timestamp,
+                                       const CallchainSchedWakeupPerfEventData& event_data) {
+  SchedWakeupPerfEventData new_event;
+  new_event.was_unblocked_by_pid = event_data.was_unblocked_by_pid;
+  new_event.was_unblocked_by_tid = event_data.was_unblocked_by_tid;
+  new_event.woken_tid = event_data.woken_tid;
+
+  Visit(event_timestamp, new_event);
+}
+
+void SwitchesStatesNamesVisitor::Visit(uint64_t event_timestamp,
+                                       const CallchainSchedSwitchPerfEventData& event_data) {
+  SchedSwitchPerfEventData new_event;
+  new_event.cpu = event_data.cpu;
+  new_event.next_tid = event_data.next_tid;
+  new_event.prev_pid_or_minus_one = event_data.prev_pid_or_minus_one;
+  new_event.prev_state = event_data.prev_state;
+  new_event.prev_tid = event_data.prev_tid;
+
+  Visit(event_timestamp, new_event);
 }
 
 void SwitchesStatesNamesVisitor::ProcessRemainingOpenStates(uint64_t timestamp_ns) {

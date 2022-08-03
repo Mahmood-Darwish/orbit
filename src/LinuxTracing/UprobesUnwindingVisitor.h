@@ -83,6 +83,14 @@ class UprobesUnwindingVisitor : public PerfEventVisitor {
 
   void Visit(uint64_t event_timestamp, const StackSamplePerfEventData& event_data) override;
   void Visit(uint64_t event_timestamp, const CallchainSamplePerfEventData& event_data) override;
+  void Visit(uint64_t event_timestamp,
+             const CallchainSchedSwitchPerfEventData& event_data) override;
+  void Visit(uint64_t event_timestamp,
+             const CallchainSchedWakeupPerfEventData& event_data) override;
+  void Visit(uint64_t event_timestamp,
+             const StackSchedSwitchPerfEventData& event_data) override;
+  void Visit(uint64_t event_timestamp,
+             const StackSchedWakeupPerfEventData& event_data) override;
   void Visit(uint64_t event_timestamp, const UprobesPerfEventData& event_data) override;
   void Visit(uint64_t event_timestamp, const UprobesWithStackPerfEventData& event_data) override;
   void Visit(uint64_t event_timestamp,

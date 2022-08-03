@@ -31,7 +31,6 @@
 #include "LinuxTracing/UserSpaceInstrumentationAddresses.h"
 #include "LostAndDiscardedEventVisitor.h"
 #include "OrbitBase/Profiling.h"
-#include "OrbitBase/ThreadUtils.h"
 #include "PerfEvent.h"
 #include "PerfEventProcessor.h"
 #include "PerfEventRingBuffer.h"
@@ -88,7 +87,9 @@ class TracerImpl : public Tracer {
 
   bool OpenThreadNameTracepoints(const std::vector<int32_t>& cpus);
   void InitSwitchesStatesNamesVisitor();
-  bool OpenContextSwitchAndThreadStateTracepoints(const std::vector<int32_t>& cpus);
+  bool OpenContextSwitchAndThreadStateTracepoints(
+      const std::vector<int32_t>& cpus, bool collect_callstack,
+      orbit_grpc_protos::CaptureOptions::UnwindingMethod unwinding_method);
 
   void InitGpuTracepointEventVisitor();
   bool OpenGpuTracepoints(const std::vector<int32_t>& cpus);
@@ -131,7 +132,7 @@ class TracerImpl : public Tracer {
   static constexpr uint64_t MMAP_TASK_RING_BUFFER_SIZE_KB = 64;
   static constexpr uint64_t SAMPLING_RING_BUFFER_SIZE_KB = 16 * 1024;
   static constexpr uint64_t THREAD_NAMES_RING_BUFFER_SIZE_KB = 64;
-  static constexpr uint64_t CONTEXT_SWITCHES_AND_THREAD_STATE_RING_BUFFER_SIZE_KB = 2 * 1024;
+  static constexpr uint64_t CONTEXT_SWITCHES_AND_THREAD_STATE_RING_BUFFER_SIZE_KB = 128 * 1024;
   static constexpr uint64_t GPU_TRACING_RING_BUFFER_SIZE_KB = 256;
   static constexpr uint64_t INSTRUMENTED_TRACEPOINTS_RING_BUFFER_SIZE_KB = 8 * 1024;
   static constexpr uint64_t UPROBES_WITH_STACK_RING_BUFFER_SIZE_KB = 64 * 1024;
@@ -176,6 +177,10 @@ class TracerImpl : public Tracer {
   absl::flat_hash_set<uint64_t> task_rename_ids_;
   absl::flat_hash_set<uint64_t> sched_switch_ids_;
   absl::flat_hash_set<uint64_t> sched_wakeup_ids_;
+  absl::flat_hash_set<uint64_t> sched_switch_with_callchain_ids_;
+  absl::flat_hash_set<uint64_t> sched_wakeup_with_callchain_ids_;
+  absl::flat_hash_set<uint64_t> sched_switch_with_stack_ids_;
+  absl::flat_hash_set<uint64_t> sched_wakeup_with_stack_ids_;
   absl::flat_hash_set<uint64_t> amdgpu_cs_ioctl_ids_;
   absl::flat_hash_set<uint64_t> amdgpu_sched_run_job_ids_;
   absl::flat_hash_set<uint64_t> dma_fence_signaled_ids_;

@@ -66,6 +66,16 @@ pid_t ReadSampleRecordPid(PerfEventRingBuffer* ring_buffer) {
   return pid;
 }
 
+pid_t ReadSampleRecordTid(PerfEventRingBuffer* ring_buffer) {
+  pid_t tid;
+  // All PERF_RECORD_SAMPLEs start with
+  //   perf_event_header header;
+  //   perf_event_sample_id_tid_time_streamid_cpu sample_id;
+  ring_buffer->ReadValueAtOffset(
+      &tid, sizeof(perf_event_header) + offsetof(perf_event_sample_id_tid_time_streamid_cpu, tid));
+  return tid;
+}
+
 uint64_t ReadThrottleUnthrottleRecordTime(PerfEventRingBuffer* ring_buffer) {
   // Note that perf_event_throttle_unthrottle::time and
   // perf_event_sample_id_tid_time_streamid_cpu::time differ a bit. Use the latter as we use that
@@ -263,6 +273,459 @@ CallchainSamplePerfEvent ConsumeCallchainSamplePerfEvent(PerfEventRingBuffer* ri
   return event;
 }
 
+CallchainSchedWakeupPerfEvent ConsumeCallchainSchedWakeupPerfEvent(
+    PerfEventRingBuffer* ring_buffer, const perf_event_header& header) {
+  //   struct {
+  //       struct perf_event_header header;
+  //       u64    sample_id;          /* if PERF_SAMPLE_IDENTIFIER */
+  //       u32    pid, tid;           /* if PERF_SAMPLE_TID */
+  //       u64    time;               /* if PERF_SAMPLE_TIME */
+  //       u64    stream_id;          /* if PERF_SAMPLE_STREAM_ID */
+  //       u32    cpu, res;           /* if PERF_SAMPLE_CPU */
+  //
+  //       u64    nr;                 /* if PERF_SAMPLE_CALLCHAIN */
+  //       u64    ips[nr];            /* if PERF_SAMPLE_CALLCHAIN */
+  //
+  //       u32    size;                /* if PERF_SAMPLE_RAW */
+  //       char   data[size];          /* if PERF_SAMPLE_RAW */
+  //
+  //       u64    abi;                 /* if PERF_SAMPLE_REGS_USER */
+  //       u64    regs[weight(mask)];  /* if PERF_SAMPLE_REGS_USER */
+  //
+  //       u64    size;                /* if PERF_SAMPLE_STACK_USER */
+  //       char   data[size];          /* if PERF_SAMPLE_STACK_USER */
+  //       u64    dyn_size;            /* if PERF_SAMPLE_STACK_USER &&
+  //                                                      size != 0 */
+  //   };
+  ORBIT_CHECK(header.size >=
+              sizeof(perf_event_header) + sizeof(perf_event_sample_id_tid_time_streamid_cpu));
+  perf_event_header ring_buffer_header;
+  ring_buffer->ReadRawAtOffset(&ring_buffer_header, 0, sizeof(perf_event_header));
+  perf_event_sample_id_tid_time_streamid_cpu sample_id;
+  ring_buffer->ReadRawAtOffset(&sample_id, sizeof(perf_event_header),
+                               sizeof(perf_event_sample_id_tid_time_streamid_cpu));
+
+  // reading ips
+  uint64_t nr = 0;
+  const size_t offset_nr =
+      sizeof(perf_event_header) + sizeof(perf_event_sample_id_tid_time_streamid_cpu);
+  // ORBIT_LOG("nr_offset: %lld", offset_nr);
+  ring_buffer->ReadRawAtOffset(&nr, offset_nr, sizeof(uint64_t));
+  const uint64_t size_of_ips_in_bytes = nr * sizeof(uint64_t);
+  const size_t offset_of_ips = sizeof(perf_event_header) +
+                               sizeof(perf_event_sample_id_tid_time_streamid_cpu) +
+                               sizeof(uint64_t);
+  // ORBIT_LOG("ips_offset_size: %lld %lld", offset_of_ips, size_of_ips_in_bytes);
+
+  // reading SAMPLE_RAW
+  uint32_t raw_size = 0;
+  ring_buffer->ReadRawAtOffset(&raw_size, offset_of_ips + size_of_ips_in_bytes, sizeof(uint32_t));
+  const uint64_t size_of_raw_in_bytes = raw_size * sizeof(uint8_t);
+  const size_t offset_of_raw = offset_of_ips + size_of_ips_in_bytes + sizeof(uint32_t);
+  // ORBIT_LOG("raw_offset_size: %lld %lld %d", offset_of_raw, size_of_raw_in_bytes, raw_size);
+  sched_wakeup_tracepoint_fixed sched_wakeup;
+  ring_buffer->ReadRawAtOffset(&sched_wakeup, offset_of_raw, size_of_raw_in_bytes);
+
+  // reading regs
+  uint64_t abi = 0;
+  const size_t offset_of_regs_user_struct = offset_of_raw + size_of_raw_in_bytes;
+  uint64_t size_of_regs_in_bytes = sizeof(uint64_t);
+  ring_buffer->ReadRawAtOffset(&abi, offset_of_regs_user_struct, size_of_regs_in_bytes);
+  if (abi != PERF_SAMPLE_REGS_ABI_NONE) {
+    // Note that perf_event_sample_regs_user_all contains abi and
+    // the regs array.
+    size_of_regs_in_bytes = sizeof(perf_event_sample_regs_user_all);
+  }
+  // ORBIT_LOG("regs_offset_size: %lld %lld", offset_of_regs_user_struct, size_of_regs_in_bytes);
+
+  // reading stack
+  const size_t offset_of_size = offset_of_regs_user_struct + size_of_regs_in_bytes;
+  const size_t offset_of_data = offset_of_size + sizeof(uint64_t);
+  uint64_t size = 0;
+  ring_buffer->ReadRawAtOffset(&size, offset_of_size, sizeof(uint64_t));
+  const size_t offset_of_dyn_size = offset_of_data + (size * sizeof(uint8_t));
+  uint64_t dyn_size = 0;
+  if (size != 0u) {
+    ring_buffer->ReadRawAtOffset(&dyn_size, offset_of_dyn_size, sizeof(uint64_t));
+  }
+  // ORBIT_LOG("size2_offset_size: %lld %lld %lld %lld", offset_of_size, offset_of_data,
+  //           offset_of_dyn_size, dyn_size);
+
+  CallchainSchedWakeupPerfEvent event{
+      .timestamp = sample_id.time,
+      .ordered_stream = PerfEventOrderedStream::FileDescriptor(ring_buffer->GetFileDescriptor()),
+      .data =
+          {
+              // The tracepoint format calls the woken tid "data.pid" but it's effectively the
+              // thread id.
+              .woken_tid = sched_wakeup.pid,
+              .was_unblocked_by_tid = static_cast<pid_t>(sample_id.tid),
+              .was_unblocked_by_pid = static_cast<pid_t>(sample_id.pid),
+              .ips_size = nr,
+              .ips = make_unique_for_overwrite<uint64_t[]>(nr),
+              .regs = make_unique_for_overwrite<perf_event_sample_regs_user_all>(),
+              .data = make_unique_for_overwrite<uint8_t[]>(dyn_size),
+          },
+  };
+  // ORBIT_LOG("checkpoint 1");
+  ring_buffer->ReadRawAtOffset(event.data.ips.get(), offset_of_ips, size_of_ips_in_bytes);
+  // ORBIT_LOG("checkpoint 2");
+  ring_buffer->ReadRawAtOffset(event.data.regs.get(), offset_of_regs_user_struct,
+                               size_of_regs_in_bytes);
+  // ORBIT_LOG("checkpoint 3");
+  ring_buffer->ReadRawAtOffset(event.data.data.get(), offset_of_data, dyn_size);
+
+  ring_buffer->SkipRecord(header);
+  return event;
+}
+
+CallchainSchedSwitchPerfEvent ConsumeCallchainSchedSwitchPerfEvent(
+    PerfEventRingBuffer* ring_buffer, const perf_event_header& header) {
+  //   struct {
+  //       struct perf_event_header header;
+  //       u64    sample_id;          /* if PERF_SAMPLE_IDENTIFIER */
+  //       u32    pid, tid;           /* if PERF_SAMPLE_TID */
+  //       u64    time;               /* if PERF_SAMPLE_TIME */
+  //       u64    stream_id;          /* if PERF_SAMPLE_STREAM_ID */
+  //       u32    cpu, res;           /* if PERF_SAMPLE_CPU */
+  //
+  //       u64    nr;                 /* if PERF_SAMPLE_CALLCHAIN */
+  //       u64    ips[nr];            /* if PERF_SAMPLE_CALLCHAIN */
+  //
+  //       u32    size;                /* if PERF_SAMPLE_RAW */
+  //       char   data[size];          /* if PERF_SAMPLE_RAW */
+  //
+  //       u64    abi;                 /* if PERF_SAMPLE_REGS_USER */
+  //       u64    regs[weight(mask)];  /* if PERF_SAMPLE_REGS_USER */
+  //
+  //       u64    size;                /* if PERF_SAMPLE_STACK_USER */
+  //       char   data[size];          /* if PERF_SAMPLE_STACK_USER */
+  //       u64    dyn_size;            /* if PERF_SAMPLE_STACK_USER &&
+  //                                                      size != 0 */
+  //   };
+  ORBIT_CHECK(header.size >=
+              sizeof(perf_event_header) + sizeof(perf_event_sample_id_tid_time_streamid_cpu));
+  perf_event_header ring_buffer_header;
+  ring_buffer->ReadRawAtOffset(&ring_buffer_header, 0, sizeof(perf_event_header));
+  perf_event_sample_id_tid_time_streamid_cpu sample_id;
+  ring_buffer->ReadRawAtOffset(&sample_id, sizeof(perf_event_header),
+                               sizeof(perf_event_sample_id_tid_time_streamid_cpu));
+
+  // reading ips
+  uint64_t nr = 0;
+  const size_t offset_nr =
+      sizeof(perf_event_header) + sizeof(perf_event_sample_id_tid_time_streamid_cpu);
+  // ORBIT_LOG("nr_offset: %lld", offset_nr);
+  ring_buffer->ReadRawAtOffset(&nr, offset_nr, sizeof(uint64_t));
+  const uint64_t size_of_ips_in_bytes = nr * sizeof(uint64_t);
+  const size_t offset_of_ips = sizeof(perf_event_header) +
+                               sizeof(perf_event_sample_id_tid_time_streamid_cpu) +
+                               sizeof(uint64_t);
+  // ORBIT_LOG("ips_offset_size: %lld %lld", offset_of_ips, size_of_ips_in_bytes);
+
+  // reading SAMPLE_RAW
+  uint32_t raw_size = 0;
+  ring_buffer->ReadRawAtOffset(&raw_size, offset_of_ips + size_of_ips_in_bytes, sizeof(uint32_t));
+  const uint64_t size_of_raw_in_bytes = raw_size * sizeof(uint8_t);
+  const size_t offset_of_raw = offset_of_ips + size_of_ips_in_bytes + sizeof(uint32_t);
+  // ORBIT_LOG("raw_offset_size: %lld %lld %d", offset_of_raw, size_of_raw_in_bytes, raw_size);
+  sched_switch_tracepoint sched_switch;
+  ring_buffer->ReadRawAtOffset(&sched_switch, offset_of_raw, size_of_raw_in_bytes);
+
+  // reading regs
+  uint64_t abi = 0;
+  const size_t offset_of_regs_user_struct = offset_of_raw + size_of_raw_in_bytes;
+  uint64_t size_of_regs_in_bytes = sizeof(uint64_t);
+  ring_buffer->ReadRawAtOffset(&abi, offset_of_regs_user_struct, size_of_regs_in_bytes);
+  if (abi != PERF_SAMPLE_REGS_ABI_NONE) {
+    // Note that perf_event_sample_regs_user_all contains abi and
+    // the regs array.
+    size_of_regs_in_bytes = sizeof(perf_event_sample_regs_user_all);
+  }
+  // ORBIT_LOG("regs_offset_size: %lld %lld", offset_of_regs_user_struct, size_of_regs_in_bytes);
+
+  // reading stack
+  const size_t offset_of_size = offset_of_regs_user_struct + size_of_regs_in_bytes;
+  const size_t offset_of_data = offset_of_size + sizeof(uint64_t);
+  uint64_t size = 0;
+  ring_buffer->ReadRawAtOffset(&size, offset_of_size, sizeof(uint64_t));
+  const size_t offset_of_dyn_size = offset_of_data + (size * sizeof(uint8_t));
+  uint64_t dyn_size = 0;
+  if (size != 0u) {
+    ring_buffer->ReadRawAtOffset(&dyn_size, offset_of_dyn_size, sizeof(uint64_t));
+  }
+  // ORBIT_LOG("size2_offset_size: %lld %lld %lld %lld", offset_of_size, offset_of_data,
+  //           offset_of_dyn_size, dyn_size);
+
+  CallchainSchedSwitchPerfEvent event{
+      .timestamp = sample_id.time,
+      .ordered_stream = PerfEventOrderedStream::FileDescriptor(ring_buffer->GetFileDescriptor()),
+      .data =
+          {
+              .cpu = sample_id.cpu,
+              // As the tracepoint data does not include the pid of the process that the thread
+              // being switched out belongs to, we use the pid set by perf_event_open in the
+              // corresponding generic field of the PERF_RECORD_SAMPLE.
+              // Note, though, that this value is -1 when the switch out is caused by the thread
+              // exiting. This is not the case for data.prev_pid, whose value is always correct as
+              // it comes directly from the tracepoint data.
+              .prev_pid_or_minus_one = static_cast<pid_t>(sample_id.pid),
+              .prev_tid = sched_switch.prev_pid,
+              .prev_state = sched_switch.prev_state,
+              .next_tid = sched_switch.next_pid,
+              .regs = make_unique_for_overwrite<perf_event_sample_regs_user_all>(),
+              .data = make_unique_for_overwrite<uint8_t[]>(dyn_size),
+          },
+  };
+  // ORBIT_LOG("checkpoint 2");
+  ring_buffer->ReadRawAtOffset(event.data.regs.get(), offset_of_regs_user_struct,
+                               size_of_regs_in_bytes);
+  // ORBIT_LOG("checkpoint 3");
+  ring_buffer->ReadRawAtOffset(event.data.data.get(), offset_of_data, dyn_size);
+
+  ring_buffer->SkipRecord(header);
+  return event;
+}
+
+StackSchedWakeupPerfEvent ConsumeStackSchedWakeupPerfEvent(PerfEventRingBuffer* ring_buffer,
+                                                           const perf_event_header& header,
+                                                           bool just_get_tracepoint) {
+  //   struct {
+  //       struct perf_event_header header;
+  //       u64    sample_id;          /* if PERF_SAMPLE_IDENTIFIER */
+  //       u32    pid, tid;           /* if PERF_SAMPLE_TID */
+  //       u64    time;               /* if PERF_SAMPLE_TIME */
+  //       u64    stream_id;          /* if PERF_SAMPLE_STREAM_ID */
+  //       u32    cpu, res;           /* if PERF_SAMPLE_CPU */
+  //
+  //       u32    size;                /* if PERF_SAMPLE_RAW */
+  //       char   data[size];          /* if PERF_SAMPLE_RAW */
+  //
+  //       u64    abi;                 /* if PERF_SAMPLE_REGS_USER */
+  //       u64    regs[weight(mask)];  /* if PERF_SAMPLE_REGS_USER */
+  //
+  //       u64    size;                /* if PERF_SAMPLE_STACK_USER */
+  //       char   data[size];          /* if PERF_SAMPLE_STACK_USER */
+  //       u64    dyn_size;            /* if PERF_SAMPLE_STACK_USER &&
+  //                                                      size != 0 */
+  //   };
+  ORBIT_CHECK(header.size >=
+              sizeof(perf_event_header) + sizeof(perf_event_sample_id_tid_time_streamid_cpu));
+  perf_event_header ring_buffer_header;
+  ring_buffer->ReadRawAtOffset(&ring_buffer_header, 0, sizeof(perf_event_header));
+  perf_event_sample_id_tid_time_streamid_cpu sample_id;
+  ring_buffer->ReadRawAtOffset(&sample_id, sizeof(perf_event_header),
+                               sizeof(perf_event_sample_id_tid_time_streamid_cpu));
+
+  // reading SAMPLE_RAW
+  uint32_t raw_size = 0;
+  const size_t offset_raw_size =
+      sizeof(perf_event_header) + sizeof(perf_event_sample_id_tid_time_streamid_cpu);
+  ring_buffer->ReadRawAtOffset(&raw_size, offset_raw_size, sizeof(uint32_t));
+  const uint64_t size_of_raw_in_bytes = raw_size * sizeof(uint8_t);
+  const size_t offset_of_raw = offset_raw_size + sizeof(uint32_t);
+  // ORBIT_LOG("raw_offset_size: %lld %lld %d", offset_of_raw, size_of_raw_in_bytes, raw_size);
+  sched_wakeup_tracepoint_fixed sched_wakeup;
+  ring_buffer->ReadRawAtOffset(&sched_wakeup, offset_of_raw, sizeof(sched_wakeup_tracepoint_fixed));
+
+  if (just_get_tracepoint) {
+    StackSchedWakeupPerfEvent event{
+        .timestamp = sample_id.time,
+        .ordered_stream = PerfEventOrderedStream::FileDescriptor(ring_buffer->GetFileDescriptor()),
+        .data =
+            {
+                // The tracepoint format calls the woken tid "data.pid" but it's effectively the
+                // thread id.
+                .woken_tid = sched_wakeup.pid,
+                .was_unblocked_by_tid = static_cast<pid_t>(sample_id.tid),
+                .was_unblocked_by_pid = static_cast<pid_t>(sample_id.pid),
+                .regs = make_unique_for_overwrite<perf_event_sample_regs_user_all>(),
+                .dyn_size = 0,
+                .data = make_unique_for_overwrite<uint8_t[]>(0),
+                .just_tracepoint = just_get_tracepoint,
+            },
+    };
+    ring_buffer->SkipRecord(header);
+    return event;
+  }
+
+  // reading regs
+  uint64_t abi = 0;
+  const size_t offset_of_regs_user_struct = offset_of_raw + size_of_raw_in_bytes;
+  uint64_t size_of_regs_in_bytes = sizeof(uint64_t);
+  ring_buffer->ReadRawAtOffset(&abi, offset_of_regs_user_struct, size_of_regs_in_bytes);
+  if (abi != PERF_SAMPLE_REGS_ABI_NONE) {
+    // Note that perf_event_sample_regs_user_all contains abi and
+    // the regs array.
+    size_of_regs_in_bytes = sizeof(perf_event_sample_regs_user_all);
+  }
+  // ORBIT_LOG("regs_offset_size: %lld %lld", offset_of_regs_user_struct, size_of_regs_in_bytes);
+
+  // reading stack
+  const size_t offset_of_size = offset_of_regs_user_struct + size_of_regs_in_bytes;
+  const size_t offset_of_data = offset_of_size + sizeof(uint64_t);
+  uint64_t size = 0;
+  ring_buffer->ReadRawAtOffset(&size, offset_of_size, sizeof(uint64_t));
+  const size_t offset_of_dyn_size = offset_of_data + (size * sizeof(uint8_t));
+  uint64_t dyn_size = 0;
+  if (size != 0u) {
+    ring_buffer->ReadRawAtOffset(&dyn_size, offset_of_dyn_size, sizeof(uint64_t));
+  }
+  // ORBIT_LOG("size2_offset_size: %lld %lld %lld %lld", offset_of_size, offset_of_data,
+  //           offset_of_dyn_size, dyn_size);
+
+  StackSchedWakeupPerfEvent event{
+      .timestamp = sample_id.time,
+      .ordered_stream = PerfEventOrderedStream::FileDescriptor(ring_buffer->GetFileDescriptor()),
+      .data =
+          {
+              // The tracepoint format calls the woken tid "data.pid" but it's effectively the
+              // thread id.
+              .woken_tid = sched_wakeup.pid,
+              .was_unblocked_by_tid = static_cast<pid_t>(sample_id.tid),
+              .was_unblocked_by_pid = static_cast<pid_t>(sample_id.pid),
+              .regs = make_unique_for_overwrite<perf_event_sample_regs_user_all>(),
+              .dyn_size = dyn_size,
+              .data = make_unique_for_overwrite<uint8_t[]>(dyn_size),
+              .just_tracepoint = just_get_tracepoint,
+          },
+  };
+  // ORBIT_LOG("checkpoint 2");
+  ring_buffer->ReadRawAtOffset(event.data.regs.get(), offset_of_regs_user_struct,
+                               size_of_regs_in_bytes);
+  // ORBIT_LOG("checkpoint 3");
+  ring_buffer->ReadRawAtOffset(event.data.data.get(), offset_of_data, dyn_size);
+
+  ring_buffer->SkipRecord(header);
+  return event;
+}
+
+StackSchedSwitchPerfEvent ConsumeStackSchedSwitchPerfEvent(PerfEventRingBuffer* ring_buffer,
+                                                           const perf_event_header& header,
+                                                           bool just_get_tracepoint) {
+  //   struct {
+  //       struct perf_event_header header;
+  //       u64    sample_id;          /* if PERF_SAMPLE_IDENTIFIER */
+  //       u32    pid, tid;           /* if PERF_SAMPLE_TID */
+  //       u64    time;               /* if PERF_SAMPLE_TIME */
+  //       u64    stream_id;          /* if PERF_SAMPLE_STREAM_ID */
+  //       u32    cpu, res;           /* if PERF_SAMPLE_CPU */
+  //
+  //       u32    size;                /* if PERF_SAMPLE_RAW */
+  //       char   data[size];          /* if PERF_SAMPLE_RAW */
+  //
+  //       u64    abi;                 /* if PERF_SAMPLE_REGS_USER */
+  //       u64    regs[weight(mask)];  /* if PERF_SAMPLE_REGS_USER */
+  //
+  //       u64    size;                /* if PERF_SAMPLE_STACK_USER */
+  //       char   data[size];          /* if PERF_SAMPLE_STACK_USER */
+  //       u64    dyn_size;            /* if PERF_SAMPLE_STACK_USER &&
+  //                                                      size != 0 */
+  //   };
+  ORBIT_CHECK(header.size >=
+              sizeof(perf_event_header) + sizeof(perf_event_sample_id_tid_time_streamid_cpu));
+  perf_event_header ring_buffer_header;
+  ring_buffer->ReadRawAtOffset(&ring_buffer_header, 0, sizeof(perf_event_header));
+  perf_event_sample_id_tid_time_streamid_cpu sample_id;
+  ring_buffer->ReadRawAtOffset(&sample_id, sizeof(perf_event_header),
+                               sizeof(perf_event_sample_id_tid_time_streamid_cpu));
+
+  // reading SAMPLE_RAW
+  uint32_t raw_size = 0;
+  const size_t offset_raw_size =
+      sizeof(perf_event_header) + sizeof(perf_event_sample_id_tid_time_streamid_cpu);
+  ring_buffer->ReadRawAtOffset(&raw_size, offset_raw_size, sizeof(uint32_t));
+  const uint64_t size_of_raw_in_bytes = raw_size * sizeof(uint8_t);
+  const size_t offset_of_raw = offset_raw_size + sizeof(uint32_t);
+  // ORBIT_LOG("raw_offset_size: %lld %lld %d", offset_of_raw, size_of_raw_in_bytes, raw_size);
+  sched_switch_tracepoint sched_switch;
+  ring_buffer->ReadRawAtOffset(&sched_switch, offset_of_raw, sizeof(sched_switch_tracepoint));
+  // ORBIT_LOG("%d %d", sched_switch.prev_pid, sched_switch.next_pid);
+
+  if (just_get_tracepoint) {
+    StackSchedSwitchPerfEvent event{
+        .timestamp = sample_id.time,
+        .ordered_stream = PerfEventOrderedStream::FileDescriptor(ring_buffer->GetFileDescriptor()),
+        .data =
+            {
+                .cpu = sample_id.cpu,
+                // As the tracepoint data does not include the pid of the process that the thread
+                // being switched out belongs to, we use the pid set by perf_event_open in the
+                // corresponding generic field of the PERF_RECORD_SAMPLE.
+                // Note, though, that this value is -1 when the switch out is caused by the thread
+                // exiting. This is not the case for data.prev_pid, whose value is always correct as
+                // it comes directly from the tracepoint data.
+                .prev_pid_or_minus_one = static_cast<pid_t>(sample_id.pid),
+                .prev_tid = sched_switch.prev_pid,
+                .prev_state = sched_switch.prev_state,
+                .next_tid = sched_switch.next_pid,
+                .regs = make_unique_for_overwrite<perf_event_sample_regs_user_all>(),
+                .dyn_size = 0,
+                .data = make_unique_for_overwrite<uint8_t[]>(0),
+                .just_tracepoint = just_get_tracepoint,
+            },
+    };
+    ring_buffer->SkipRecord(header);
+    return event;
+  }
+
+  // reading regs
+  uint64_t abi = 0;
+  const size_t offset_of_regs_user_struct = offset_of_raw + size_of_raw_in_bytes;
+  uint64_t size_of_regs_in_bytes = sizeof(uint64_t);
+  ring_buffer->ReadRawAtOffset(&abi, offset_of_regs_user_struct, size_of_regs_in_bytes);
+  if (abi != PERF_SAMPLE_REGS_ABI_NONE) {
+    // Note that perf_event_sample_regs_user_all contains abi and
+    // the regs array.
+    size_of_regs_in_bytes = sizeof(perf_event_sample_regs_user_all);
+  }
+  // ORBIT_LOG("regs_offset_size: %lld %lld", offset_of_regs_user_struct, size_of_regs_in_bytes);
+
+  // reading stack
+  const size_t offset_of_size = offset_of_regs_user_struct + size_of_regs_in_bytes;
+  const size_t offset_of_data = offset_of_size + sizeof(uint64_t);
+  uint64_t size = 0;
+  ring_buffer->ReadRawAtOffset(&size, offset_of_size, sizeof(uint64_t));
+  const size_t offset_of_dyn_size = offset_of_data + (size * sizeof(uint8_t));
+  uint64_t dyn_size = 0;
+  if (size != 0u) {
+    ring_buffer->ReadRawAtOffset(&dyn_size, offset_of_dyn_size, sizeof(uint64_t));
+  }
+  // ORBIT_LOG("size2_offset_size: %lld %lld %lld %lld", offset_of_size, offset_of_data,
+  //          offset_of_dyn_size, dyn_size);
+
+  StackSchedSwitchPerfEvent event{
+      .timestamp = sample_id.time,
+      .ordered_stream = PerfEventOrderedStream::FileDescriptor(ring_buffer->GetFileDescriptor()),
+      .data =
+          {
+              .cpu = sample_id.cpu,
+              // As the tracepoint data does not include the pid of the process that the thread
+              // being switched out belongs to, we use the pid set by perf_event_open in the
+              // corresponding generic field of the PERF_RECORD_SAMPLE.
+              // Note, though, that this value is -1 when the switch out is caused by the thread
+              // exiting. This is not the case for data.prev_pid, whose value is always correct as
+              // it comes directly from the tracepoint data.
+              .prev_pid_or_minus_one = static_cast<pid_t>(sample_id.pid),
+              .prev_tid = sched_switch.prev_pid,
+              .prev_state = sched_switch.prev_state,
+              .next_tid = sched_switch.next_pid,
+              .regs = make_unique_for_overwrite<perf_event_sample_regs_user_all>(),
+              .dyn_size = dyn_size,
+              .data = make_unique_for_overwrite<uint8_t[]>(dyn_size),
+              .just_tracepoint = just_get_tracepoint,
+          },
+  };
+  // ORBIT_LOG("checkpoint 2");
+  ring_buffer->ReadRawAtOffset(event.data.regs.get(), offset_of_regs_user_struct,
+                               size_of_regs_in_bytes);
+  // ORBIT_LOG("checkpoint 3");
+  ring_buffer->ReadRawAtOffset(event.data.data.get(), offset_of_data, dyn_size);
+
+  ring_buffer->SkipRecord(header);
+  return event;
+}
+
 UprobesWithStackPerfEvent ConsumeUprobeWithStackPerfEvent(PerfEventRingBuffer* ring_buffer,
                                                           const perf_event_header& header) {
   // We expect the following layout of the perf event:
@@ -289,7 +752,7 @@ UprobesWithStackPerfEvent ConsumeUprobeWithStackPerfEvent(PerfEventRingBuffer* r
   uint64_t size = 0;
   ring_buffer->ReadValueAtOffset(&size, offset_of_size);
 
-  size_t offset_of_dyn_size = offset_of_data + (size * sizeof(char));
+  size_t offset_of_dyn_size = offset_of_data + (size * sizeof(uint8_t));
 
   uint64_t dyn_size = 0;
   ring_buffer->ReadValueAtOffset(&dyn_size, offset_of_dyn_size);
